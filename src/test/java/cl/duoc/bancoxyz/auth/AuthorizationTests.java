@@ -24,6 +24,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @SpringBootTest(properties = {
     "auth.web-client-secret=only-for-tests-never-use-this-secret",
+    "auth.mobile-client-secret=mobile-only-tests-never-use-this-secret",
+    "auth.atm-client-secret=atm-only-tests-never-use-this-secret",
     "auth.issuer=http://localhost:9000"
 })
 @AutoConfigureMockMvc
@@ -41,7 +43,7 @@ class AuthorizationTests {
 
     @Test void issuesSignedAccessTokenWithAudienceAndShortLifetime() throws Exception {
         String body = mvc.perform(post("/oauth2/token").with(httpBasic("web-demo", SECRET))
-                .param("grant_type", "client_credentials").param("scope", "web.read"))
+                .param("grant_type", "client_credentials").param("scope", "web.read web.write"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.token_type").value("Bearer"))
             .andExpect(jsonPath("$.refresh_token").doesNotExist())
@@ -52,14 +54,59 @@ class AuthorizationTests {
         assertEquals("http://localhost:9000", token.getJWTClaimsSet().getIssuer());
         assertEquals(List.of("bff-web"), token.getJWTClaimsSet().getAudience());
         assertEquals("web-demo", token.getJWTClaimsSet().getSubject());
+        assertTrue(token.getJWTClaimsSet().getStringListClaim("scope").contains("web.write"));
         assertEquals(300_000L, token.getJWTClaimsSet().getExpirationTime().getTime()
                 - token.getJWTClaimsSet().getIssueTime().getTime());
+    }
+
+    @Test void customerScopesIncludeDomainAudience() throws Exception {
+        String body = mvc.perform(post("/oauth2/token").with(httpBasic("web-demo", SECRET))
+                .param("grant_type", "client_credentials")
+                .param("scope", "web.customers.read web.customers.write"))
+            .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        var response = new ObjectMapper().readValue(body, Map.class);
+        var claims = SignedJWT.parse((String) response.get("access_token")).getJWTClaimsSet();
+        assertEquals(List.of("bff-web", "customer-service"), claims.getAudience());
+        assertTrue(claims.getStringListClaim("scope").contains("web.customers.write"));
     }
 
     @Test void rejectsWrongSecret() throws Exception {
         mvc.perform(post("/oauth2/token").with(httpBasic("web-demo", "incorrect"))
                 .param("grant_type", "client_credentials").param("scope", "web.read"))
             .andExpect(status().isUnauthorized());
+    }
+    @Test void channelsCannotRequestEachOthersScopes() throws Exception {
+        mvc.perform(post("/oauth2/token").with(httpBasic("mobile-demo","mobile-only-tests-never-use-this-secret"))
+            .param("grant_type","client_credentials").param("scope","web.payments.write"))
+            .andExpect(status().isBadRequest()).andExpect(jsonPath("$.error").value("invalid_scope"));
+        mvc.perform(post("/oauth2/token").with(httpBasic("atm-demo","atm-only-tests-never-use-this-secret"))
+            .param("grant_type","client_credentials").param("scope","atm.accounts.write"))
+            .andExpect(status().isBadRequest());
+    }
+    @Test void channelsReceiveOwnAudienceAndDomainAudiences() throws Exception {
+        for(String channel:List.of("mobile","atm")) {
+            String body=mvc.perform(post("/oauth2/token").with(httpBasic(channel+"-demo",channel+"-only-tests-never-use-this-secret"))
+                .param("grant_type","client_credentials").param("scope",channel+".customers.read "+channel+".accounts.read "+channel+".payments.write"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+            var response=new ObjectMapper().readValue(body,Map.class);
+            assertEquals(List.of("bff-"+channel,"customer-service","account-service","payment-service"),SignedJWT.parse((String)response.get("access_token")).getJWTClaimsSet().getAudience());
+        }
+    }
+    @Test void paymentScopesHaveOnlyPaymentAudience() throws Exception {
+        String body=mvc.perform(post("/oauth2/token").with(httpBasic("web-demo",SECRET))
+                .param("grant_type","client_credentials").param("scope","web.payments.read web.payments.write"))
+            .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        var response=new ObjectMapper().readValue(body,Map.class);
+        assertEquals(List.of("bff-web","payment-service"),SignedJWT.parse((String)response.get("access_token")).getJWTClaimsSet().getAudience());
+    }
+    @Test void accountWriterGetsOnlyRequiredDomainAudiences() throws Exception {
+        String body=mvc.perform(post("/oauth2/token").with(httpBasic("web-demo",SECRET))
+                .param("grant_type","client_credentials").param("scope","web.accounts.write"))
+            .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        var response=new ObjectMapper().readValue(body,Map.class);
+        var claims=SignedJWT.parse((String)response.get("access_token")).getJWTClaimsSet();
+        assertEquals(List.of("bff-web","customer-service","account-service"),claims.getAudience());
+        assertEquals(List.of("web.accounts.write"),claims.getStringListClaim("scope"));
     }
 
     @Test void rejectsUnknownClient() throws Exception {
@@ -70,7 +117,7 @@ class AuthorizationTests {
 
     @Test void rejectsUnregisteredScope() throws Exception {
         mvc.perform(post("/oauth2/token").with(httpBasic("web-demo", SECRET))
-                .param("grant_type", "client_credentials").param("scope", "web.write"))
+                .param("grant_type", "client_credentials").param("scope", "web.admin"))
             .andExpect(status().isBadRequest())
             .andExpect(jsonPath("$.error").value("invalid_scope"));
     }

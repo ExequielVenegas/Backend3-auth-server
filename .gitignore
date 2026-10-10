@@ -1,2 +1,14 @@
 # Project exclude paths
 /target/
+# Archivos locales y credenciales
+.env
+.env.*
+!.env.example
+**/secrets/
+**/*.log
+**/*.pem
+**/*.key
+**/*.p12
+**/*.jks
+**/target/
+**/.trabajo/
